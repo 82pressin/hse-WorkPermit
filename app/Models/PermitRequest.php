@@ -69,4 +69,28 @@ class PermitRequest extends Model
     {
         return $this->hasMany(PermitDocument::class);
     }
+
+    public const STATUSES = [
+        'review_hse' => 'Review HSE',
+        'perlu_revisi' => 'Perlu Revisi',
+        'menunggu_jsea' => 'Menunggu TTD JSEA',
+        'menunggu_gm' => 'Menunggu TTD GM',
+        'diterbitkan' => 'Diterbitkan',
+        'selesai' => 'Selesai',
+        'ditolak' => 'Ditolak',
+    ];
+
+    protected $attributes = [
+        'status' => 'review_hse',
+    ];
+
+    public function histories()
+    {
+        return $this->hasMany(PermitHistory::class);
+    }
+
+    public function latestRevisionNote(): ?string
+    {
+        return $this->histories()->where('to_status', 'perlu_revisi')->latest('id')->value('note');
+    }
 }

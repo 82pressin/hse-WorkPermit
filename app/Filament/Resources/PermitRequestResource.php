@@ -4,13 +4,18 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\PermitRequestResource\Pages;
 use App\Models\PermitRequest;
+use App\Services\PermitWorkflow;
+
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Forms\Get;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
+use Filament\Notifications\Notification;
+
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 
 class PermitRequestResource extends Resource
 {
@@ -23,6 +28,27 @@ class PermitRequestResource extends Resource
     public static function canCreate(): bool
     {
         return in_array(auth()->user()->role, ['pemohon', 'admin']);
+    }
+
+    public static function canEdit(Model $record): bool
+    {
+        $user = auth()->user();
+
+        return match ($user->role) {
+            'admin' => true,
+            'pemohon' => $record->status === 'perlu_revisi' && $record->department === $user->department,
+            default => false,
+        };
+    }
+
+    protected static function runWorkflow(\Closure $callback, string $successMessage): void
+    {
+        try {
+            $callback();
+            Notification::make()->title($successMessage)->success()->send();
+        } catch (\DomainException $e) {
+            Notification::make()->title($e->getMessage())->danger()->send();
+        }
     }
 
     // Siapa boleh melihat data apa
@@ -63,8 +89,8 @@ class PermitRequestResource extends Resource
                     Forms\Components\Textarea::make('job_description')->label('Uraian Pekerjaan')->required()->columnSpanFull(),
                     Forms\Components\DatePicker::make('start_date')->label('Tanggal Mulai')->required(),
                     Forms\Components\DatePicker::make('end_date')->label('Tanggal Selesai')->required()->afterOrEqual('start_date'),
-                    Forms\Components\TimePicker::make('start_time')->label('Jam Mulai')->required(),
-                    Forms\Components\TimePicker::make('end_time')->label('Jam Selesai')->required(),
+                    Forms\Components\TimePicker::make('start_time')->label('Jam Mulai')->required()->seconds(false),
+                    Forms\Components\TimePicker::make('end_time')->label('Jam Selesai')->required()->seconds(false),
                     Forms\Components\TextInput::make('personnel_count')->label('Jumlah Personil')->numeric()->minValue(1)->required(),
                 ])->columns(2),
 
@@ -107,7 +133,9 @@ class PermitRequestResource extends Resource
                                 ->directory('permit-documents')
                                 ->acceptedFileTypes(['application/pdf', 'image/jpeg', 'image/png'])
                                 ->maxSize(10240)
-                                ->storeFileNamesIn('original_name'),
+                                ->storeFileNamesIn('original_name')
+                                ->downloadable()
+                                ->openable()
                         ])->columns(2),
                 ]),
         ]);
@@ -115,12 +143,21 @@ class PermitRequestResource extends Resource
 
     public static function table(Table $table): Table
     {
+        $isHse = fn () => in_array(auth()->user()->role, ['foreman_hse', 'spv_hse']);
+
         return $table
             ->columns([
                 Tables\Columns\TextColumn::make('permit_number')->label('No. Izin')->placeholder('-')->searchable(),
                 Tables\Columns\TextColumn::make('vendor_name')->label('Vendor')->searchable(),
                 Tables\Columns\TextColumn::make('department')->label('Dept'),
-                Tables\Columns\TextColumn::make('status')->badge(),
+                Tables\Columns\TextColumn::make('status')->badge()
+                    ->formatStateUsing(fn (string $state) => PermitRequest::STATUSES[$state] ?? $state)
+                    ->color(fn (string $state) => match ($state) {
+                        'perlu_revisi', 'ditolak' => 'danger',
+                        'review_hse' => 'warning',
+                        'diterbitkan', 'selesai' => 'success',
+                        default => 'info',
+                    }),
                 Tables\Columns\TextColumn::make('risk_level')->label('Risiko')->badge()
                     ->color(fn (?string $state) => match ($state) {
                         'tinggi' => 'danger',
@@ -128,10 +165,43 @@ class PermitRequestResource extends Resource
                         'rendah' => 'success',
                         default => 'gray',
                     }),
+                Tables\Columns\TextColumn::make('revision_note')->label('Catatan revisi')
+                    ->getStateUsing(fn (PermitRequest $r) => $r->status === 'perlu_revisi' ? $r->latestRevisionNote() : null)
+                    ->placeholder('-')->wrap(),
                 Tables\Columns\TextColumn::make('start_date')->label('Mulai')->date('d M Y'),
             ])
             ->defaultSort('created_at', 'desc')
-            ->actions([Tables\Actions\EditAction::make()]);
+            ->actions([
+                Tables\Actions\ViewAction::make(),
+                Tables\Actions\EditAction::make(),
+
+                Tables\Actions\Action::make('approve_review')
+                    ->label('Lolos Review')->icon('heroicon-o-check-circle')->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (PermitRequest $r) => $isHse() && $r->status === 'review_hse')
+                    ->action(fn (PermitRequest $r) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->approveReview($r, auth()->user()),
+                        'Review disetujui, lanjut ke JSEA'
+                    )),
+
+                Tables\Actions\Action::make('return_revision')
+                    ->label('Kembalikan untuk Revisi')->icon('heroicon-o-arrow-uturn-left')->color('danger')
+                    ->form([Forms\Components\Textarea::make('note')->label('Catatan revisi')->required()])
+                    ->visible(fn (PermitRequest $r) => $isHse() && $r->status === 'review_hse')
+                    ->action(fn (PermitRequest $r, array $data) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->returnForRevision($r, auth()->user(), $data['note']),
+                        'Permohonan dikembalikan ke pemohon'
+                    )),
+
+                Tables\Actions\Action::make('resubmit')
+                    ->label('Ajukan Ulang')->icon('heroicon-o-paper-airplane')
+                    ->requiresConfirmation()
+                    ->visible(fn (PermitRequest $r) => auth()->user()->role === 'pemohon' && $r->status === 'perlu_revisi')
+                    ->action(fn (PermitRequest $r) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->resubmit($r, auth()->user()),
+                        'Permohonan diajukan ulang ke HSE'
+                    )),
+            ]);
     }
 
     public static function getPages(): array
@@ -141,5 +211,10 @@ class PermitRequestResource extends Resource
             'create' => Pages\CreatePermitRequest::route('/create'),
             'edit' => Pages\EditPermitRequest::route('/{record}/edit'),
         ];
+    }
+
+    public static function canDelete(Model $record): bool
+    {
+        return auth()->user()->role === 'admin';
     }
 }

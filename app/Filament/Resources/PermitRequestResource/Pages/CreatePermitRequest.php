@@ -17,4 +17,9 @@ class CreatePermitRequest extends CreateRecord
 
     return $data;
     }
+
+    protected function afterCreate(): void
+    {
+        app(\App\Services\PermitWorkflow::class)->logSubmitted($this->record, auth()->user());
+    }
 }
