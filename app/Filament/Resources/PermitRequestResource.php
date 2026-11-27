@@ -59,7 +59,15 @@ class PermitRequestResource extends Resource
 
         if ($user->role === 'pemohon') {
             $query->where('department', $user->department);
+        } elseif (in_array($user->role, PermitRequest::RESTRICTED_ROLES)) {
+            $active = PermitRequest::ACTIVE_STATUSES[$user->role];
+
+            $query->where(function ($q) use ($active, $user) {
+                $q->whereIn('status', $active)
+                ->orWhereHas('histories.user', fn ($u) => $u->where('role', $user->role));
+            });
         }
+        // admin dan HSE: tanpa filter, melihat semuanya
 
         return $query;
     }
@@ -148,16 +156,38 @@ class PermitRequestResource extends Resource
         return $table
             ->columns([
                 Tables\Columns\TextColumn::make('permit_number')->label('No. Izin')->placeholder('-')->searchable(),
+
                 Tables\Columns\TextColumn::make('vendor_name')->label('Vendor')->searchable(),
+
                 Tables\Columns\TextColumn::make('department')->label('Dept'),
+                
+                Tables\Columns\TextColumn::make('requester.name')->label('Pemohon')->searchable(),
+
                 Tables\Columns\TextColumn::make('status')->badge()
-                    ->formatStateUsing(fn (string $state) => PermitRequest::STATUSES[$state] ?? $state)
-                    ->color(fn (string $state) => match ($state) {
+                    ->formatStateUsing(fn (string $state) => static::isMaskedFor($state)
+                        ? 'Sudah diproses'
+                        : (PermitRequest::STATUSES[$state] ?? $state))
+                    ->color(fn (string $state) => static::isMaskedFor($state) ? 'gray' : match ($state) {
                         'perlu_revisi', 'ditolak' => 'danger',
                         'review_hse' => 'warning',
                         'diterbitkan', 'selesai' => 'success',
                         default => 'info',
                     }),
+
+                Tables\Columns\TextColumn::make('jsea_progress')->label('TTD JSEA')
+                    ->visible(fn () => in_array(auth()->user()->role, ['foreman_hse', 'spv_hse', 'admin']))
+                    ->getStateUsing(function (PermitRequest $r) {
+                        if (in_array($r->status, ['review_hse', 'perlu_revisi'])) {
+                            return null;
+                        }
+                        $labels = ['spv_hse' => 'Spv HSE', 'ka_dept_ga' => 'Ka.Dept GA'];
+
+                        return collect(PermitRequest::JSEA_APPROVER_ROLES)
+                            ->map(fn ($role) => $labels[$role] . ' ' . ($r->hasActiveApprovalFrom('jsea', $role) ? '✓' : '–'))
+                            ->implode(' · ');
+                    })
+                    ->placeholder('-'),
+
                 Tables\Columns\TextColumn::make('risk_level')->label('Risiko')->badge()
                     ->color(fn (?string $state) => match ($state) {
                         'tinggi' => 'danger',
@@ -165,13 +195,15 @@ class PermitRequestResource extends Resource
                         'rendah' => 'success',
                         default => 'gray',
                     }),
+
                 Tables\Columns\TextColumn::make('revision_note')->label('Catatan revisi')
                     ->getStateUsing(fn (PermitRequest $r) => $r->status === 'perlu_revisi' ? $r->latestRevisionNote() : null)
                     ->placeholder('-')->wrap(),
+
                 Tables\Columns\TextColumn::make('start_date')->label('Mulai')->date('d M Y'),
-            ])
-            ->defaultSort('created_at', 'desc')
-            ->actions([
+                Tables\Columns\TextColumn::make('end_date')->label('Selesai')->date('d M Y'),])
+                    ->defaultSort('created_at', 'desc')
+                    ->actions([
                 Tables\Actions\ViewAction::make(),
                 Tables\Actions\EditAction::make(),
 
@@ -191,6 +223,28 @@ class PermitRequestResource extends Resource
                     ->action(fn (PermitRequest $r, array $data) => static::runWorkflow(
                         fn () => app(PermitWorkflow::class)->returnForRevision($r, auth()->user(), $data['note']),
                         'Permohonan dikembalikan ke pemohon'
+                    )),
+                    
+                Tables\Actions\Action::make('approve_jsea')
+                    ->label('Setujui JSEA')->icon('heroicon-o-pencil-square')->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (PermitRequest $r) => in_array(auth()->user()->role, PermitRequest::JSEA_APPROVER_ROLES)
+                        && $r->status === 'menunggu_jsea'
+                        && ! $r->hasActiveApprovalFrom('jsea', auth()->user()->role))
+                    ->action(fn (PermitRequest $r) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->approveJsea($r, auth()->user()),
+                        'JSEA disetujui'
+                    )),
+
+                Tables\Actions\Action::make('return_jsea')
+                    ->label('Kembalikan JSEA')->icon('heroicon-o-arrow-uturn-left')->color('danger')
+                    ->form([Forms\Components\Textarea::make('note')->label('Catatan revisi')->required()])
+                    ->visible(fn (PermitRequest $r) => in_array(auth()->user()->role, PermitRequest::JSEA_APPROVER_ROLES)
+                        && $r->status === 'menunggu_jsea'
+                        && ! $r->hasActiveApprovalFrom('jsea', auth()->user()->role))
+                    ->action(fn (PermitRequest $r, array $data) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->returnFromJsea($r, auth()->user(), $data['note']),
+                        'JSEA dikembalikan ke pemohon'
                     )),
 
                 Tables\Actions\Action::make('resubmit')
@@ -216,5 +270,13 @@ class PermitRequestResource extends Resource
     public static function canDelete(Model $record): bool
     {
         return auth()->user()->role === 'admin';
+    }
+
+    protected static function isMaskedFor(string $state): bool
+    {
+        $role = auth()->user()->role;
+
+        return in_array($role, PermitRequest::RESTRICTED_ROLES)
+            && ! in_array($state, PermitRequest::ACTIVE_STATUSES[$role]);
     }
 }

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\PermitHistory;
 use App\Models\PermitRequest;
 use App\Models\User;
+use App\Models\Approval;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
@@ -59,6 +60,12 @@ class PermitWorkflow
     {
         DB::transaction(function () use ($permit, $user, $to, $note, $extra) {
             $from = $permit->status;
+
+            if ($to === 'perlu_revisi') {
+                $permit->approvals()
+                ->whereNull('expired_at')
+                ->update(['expired_at' => now()]);
+            }
             $permit->update(['status' => $to] + $extra);
             $this->log($permit, $user, $from, $to, $note);
         });
@@ -87,5 +94,45 @@ class PermitWorkflow
         if ($permit->status !== $status) {
             throw new DomainException('Status permohonan tidak sesuai untuk aksi ini.');
         }
+    }
+
+    public function approveJsea(PermitRequest $permit, User $user): void
+    {
+        $this->requireRole($user, PermitRequest::JSEA_APPROVER_ROLES);
+        $this->requireStatus($permit, 'menunggu_jsea');
+
+        DB::transaction(function () use ($permit, $user) {
+            if ($permit->hasActiveApprovalFrom('jsea', $user->role)) {
+                throw new DomainException('Kamu sudah menyetujui JSEA ini.');
+            }
+
+            Approval::create([
+                'permit_request_id' => $permit->id,
+                'document_type' => 'jsea',
+                'approver_role' => $user->role,
+                'approved_by' => $user->id,
+                'approved_at' => now(),
+            ]);
+            $this->log($permit, $user, 'menunggu_jsea', 'menunggu_jsea', 'JSEA disetujui');
+
+            $signed = $permit->approvals()->whereNull('expired_at')
+                ->where('document_type', 'jsea')->pluck('approver_role');
+
+            if (collect(PermitRequest::JSEA_APPROVER_ROLES)->diff($signed)->isEmpty()) {
+                $this->transition($permit, $user, 'penyusunan_surat');
+            }
+        });
+    }
+
+    public function returnFromJsea(PermitRequest $permit, User $user, string $note): void
+    {
+        $this->requireRole($user, PermitRequest::JSEA_APPROVER_ROLES);
+        $this->requireStatus($permit, 'menunggu_jsea');
+
+        if (trim($note) === '') {
+            throw new DomainException('Catatan revisi wajib diisi.');
+        }
+
+        $this->transition($permit, $user, 'perlu_revisi', $note);
     }
 }
