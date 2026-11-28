@@ -161,8 +161,6 @@ class PermitRequestResource extends Resource
 
                 Tables\Columns\TextColumn::make('department')->label('Dept'),
                 
-                Tables\Columns\TextColumn::make('requester.name')->label('Pemohon')->searchable(),
-
                 Tables\Columns\TextColumn::make('status')->badge()
                     ->formatStateUsing(fn (string $state) => static::isMaskedFor($state)
                         ? 'Sudah diproses'

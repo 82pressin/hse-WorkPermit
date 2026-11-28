@@ -33,16 +33,14 @@ class ListPermitRequests extends ListRecords
 
         $tabs = [
             'aktif' => Tab::make('Perlu tindakan saya')
-                ->modifyQueryUsing(fn (Builder $q) => $q->whereIn('status', $active)),
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereIn('status', $active)),
         ];
 
         $tabs += in_array($role, PermitRequest::RESTRICTED_ROLES)
             ? ['riwayat' => Tab::make('Riwayat')
-                ->modifyQueryUsing(fn (Builder $q) => $q->whereNotIn('status', $active))]
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereNotIn('status', $active))]
             : ['semua' => Tab::make('Semua')];
-
-        return $tabs;
-    }
+            }
 
     public function getDefaultActiveTab(): string|int|null
     {
