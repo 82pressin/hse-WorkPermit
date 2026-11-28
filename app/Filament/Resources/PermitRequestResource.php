@@ -234,6 +234,8 @@ class PermitRequestResource extends Resource
                         'JSEA disetujui'
                     )),
 
+                
+
                 Tables\Actions\Action::make('return_jsea')
                     ->label('Kembalikan JSEA')->icon('heroicon-o-arrow-uturn-left')->color('danger')
                     ->form([Forms\Components\Textarea::make('note')->label('Catatan revisi')->required()])
@@ -243,6 +245,47 @@ class PermitRequestResource extends Resource
                     ->action(fn (PermitRequest $r, array $data) => static::runWorkflow(
                         fn () => app(PermitWorkflow::class)->returnFromJsea($r, auth()->user(), $data['note']),
                         'JSEA dikembalikan ke pemohon'
+                    )),
+
+                Tables\Actions\Action::make('pdf')
+                    ->label(fn (PermitRequest $r) => in_array($r->status, ['diterbitkan', 'selesai']) ? 'Unduh Surat Izin' : 'Pratinjau Surat')
+                    ->icon('heroicon-o-document-text')
+                    ->url(fn (PermitRequest $r) => route('permits.pdf', $r->id))
+                    ->openUrlInNewTab()
+                    ->visible(function (PermitRequest $r) {
+                        if (in_array($r->status, ['diterbitkan', 'selesai'])) {
+                            return true;
+                        }
+                        return in_array($r->status, ['penyusunan_surat', 'menunggu_gm'])
+                            && in_array(auth()->user()->role, ['foreman_hse', 'spv_hse', 'gm', 'admin']);
+                    }),
+
+                Tables\Actions\Action::make('submit_to_gm')
+                    ->label('Susun Surat & Ajukan ke GM')->icon('heroicon-o-paper-airplane')->color('success')
+                    ->requiresConfirmation()
+                    ->modalDescription('Nomor izin akan dibuat. Pastikan pratinjau PDF sudah kamu cek.')
+                    ->visible(fn (PermitRequest $r) => $isHse() && $r->status === 'penyusunan_surat')
+                    ->action(fn (PermitRequest $r) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->submitToGm($r, auth()->user()),
+                        'Surat diajukan ke GM'
+                    )),
+
+                Tables\Actions\Action::make('approve_final')
+                    ->label('Setujui & Terbitkan')->icon('heroicon-o-check-badge')->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (PermitRequest $r) => auth()->user()->role === 'gm' && $r->status === 'menunggu_gm')
+                    ->action(fn (PermitRequest $r) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->approveFinal($r, auth()->user()),
+                        'Surat Izin Kerja diterbitkan'
+                    )),
+
+                Tables\Actions\Action::make('return_gm')
+                    ->label('Kembalikan')->icon('heroicon-o-arrow-uturn-left')->color('danger')
+                    ->form([Forms\Components\Textarea::make('note')->label('Catatan revisi')->required()])
+                    ->visible(fn (PermitRequest $r) => auth()->user()->role === 'gm' && $r->status === 'menunggu_gm')
+                    ->action(fn (PermitRequest $r, array $data) => static::runWorkflow(
+                        fn () => app(PermitWorkflow::class)->returnFromGm($r, auth()->user(), $data['note']),
+                        'Dikembalikan, mulai lagi dari review HSE'
                     )),
 
                 Tables\Actions\Action::make('resubmit')

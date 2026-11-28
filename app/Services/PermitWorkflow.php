@@ -135,4 +135,61 @@ class PermitWorkflow
 
         $this->transition($permit, $user, 'perlu_revisi', $note);
     }
+
+    public function submitToGm(PermitRequest $permit, User $user): void
+    {
+        $this->requireRole($user, self::HSE_ROLES);
+        $this->requireStatus($permit, 'penyusunan_surat');
+
+        DB::transaction(function () use ($permit, $user) {
+            if (! $permit->permit_number) {      // nomor dibuat sekali, tetap sama walau direvisi
+                $this->assignPermitNumber($permit);
+            }
+            $this->transition($permit, $user, 'menunggu_gm');
+        });
+    }
+
+    public function approveFinal(PermitRequest $permit, User $user): void
+    {
+        $this->requireRole($user, ['gm']);
+        $this->requireStatus($permit, 'menunggu_gm');
+
+        DB::transaction(function () use ($permit, $user) {
+            Approval::create([
+                'permit_request_id' => $permit->id,
+                'document_type' => 'surat_izin',
+                'approver_role' => 'gm',
+                'approved_by' => $user->id,
+                'approved_at' => now(),
+            ]);
+
+            $this->transition($permit, $user, 'diterbitkan', 'Surat Izin Kerja diterbitkan', [
+                'issued_at' => now(),
+            ]);
+        });
+    }
+
+    public function returnFromGm(PermitRequest $permit, User $user, string $note): void
+    {
+        $this->requireRole($user, ['gm']);
+        $this->requireStatus($permit, 'menunggu_gm');
+
+        if (trim($note) === '') {
+            throw new DomainException('Catatan revisi wajib diisi.');
+        }
+
+        $this->transition($permit, $user, 'perlu_revisi', $note);
+    }
+
+    private function assignPermitNumber(PermitRequest $permit): void
+    {
+        $year = now()->year;
+        $roman = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
+
+        $next = (int) PermitRequest::where('permit_number', 'like', "%/{$year}")->max('number_sequence') + 1;
+
+        $permit->number_sequence = $next;
+        $permit->permit_number = sprintf('%d/IK/UM/KRM/%s/%d', $next, $roman[now()->month], $year);
+        $permit->save();
+    }
 }
