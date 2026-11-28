@@ -40,7 +40,9 @@ class ListPermitRequests extends ListRecords
             ? ['riwayat' => Tab::make('Riwayat')
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereNotIn('status', $active))]
             : ['semua' => Tab::make('Semua')];
-            }
+
+        return $tabs;
+    }
 
     public function getDefaultActiveTab(): string|int|null
     {
